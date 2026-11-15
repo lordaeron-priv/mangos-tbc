@@ -33,9 +33,6 @@
 #include "Maps/MapPersistentStateMgr.h"
 #include "Spells/SpellAuras.h"
 #include "BattleGround/BattleGroundMgr.h"
-#ifdef BUILD_DEPRECATED_PLAYERBOT
-#include "PlayerBot/Base/PlayerbotMgr.h"
-#endif
 
 GroupMemberStatus GetGroupMemberStatus(const Player* member = nullptr)
 {
@@ -45,10 +42,11 @@ GroupMemberStatus GetGroupMemberStatus(const Player* member = nullptr)
         flags |= MEMBER_STATUS_ONLINE;
         if (member->IsPvP())
             flags |= MEMBER_STATUS_PVP;
-        if (member->IsDead())
-            flags |= MEMBER_STATUS_DEAD;
+        // a released member keeps the corpse death state, but it is a ghost, not dead
         if (member->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST))
             flags |= MEMBER_STATUS_GHOST;
+        else if (member->IsDead())
+            flags |= MEMBER_STATUS_DEAD;
         if (member->IsPvPFreeForAll())
             flags |= MEMBER_STATUS_PVP_FFA;
         if (!member->IsInWorld())
@@ -338,7 +336,7 @@ bool Group::AddMember(ObjectGuid guid, const char* name)
 
             if (Player* member = itr->getSource())
             {
-                if (player->HasAtClient(member))
+                if (player->IsCreatedAtClient(member))      // a creation not written yet carries the values
                 {
                     UpdateMask updateMask;
                     updateMask.SetCount(member->GetValuesCount());
@@ -347,7 +345,7 @@ bool Group::AddMember(ObjectGuid guid, const char* name)
                         member->BuildValuesUpdateBlockForPlayer(groupData, updateMask, player);
                 }
 
-                if (member->HasAtClient(player))
+                if (member->IsCreatedAtClient(player))
                 {
                     UpdateMask updateMask;
                     updateMask.SetCount(member->GetValuesCount());
@@ -380,11 +378,6 @@ bool Group::AddMember(ObjectGuid guid, const char* name)
 uint32 Group::RemoveMember(ObjectGuid guid, uint8 method)
 {
     Player* player = sObjectMgr.GetPlayer(guid);
-#ifdef BUILD_DEPRECATED_PLAYERBOT
-    // if master leaves group, all bots leave group
-    if (player && player->GetPlayerbotMgr())
-        player->GetPlayerbotMgr()->RemoveAllBotsFromGroup();
-#endif
 
     _updateMembersOnRosterChanged(player);
 

@@ -1055,9 +1055,6 @@ ChatCommand* ChatHandler::getCommandTable()
         { "mmap",           SEC_GAMEMASTER,     false, nullptr,                                        "", mmapCommandTable },
         { "worldstate",     SEC_ADMINISTRATOR,  false, nullptr,                                        "", worldStateTable },
         { "loot",           SEC_GAMEMASTER,     true,  nullptr,                                        "", lootCommandTable },
-#ifdef BUILD_DEPRECATED_PLAYERBOT
-        { "bot",            SEC_PLAYER,         false, &ChatHandler::HandlePlayerbotCommand,           "", nullptr },
-#endif
         { nullptr,          0,                  false, nullptr,                                        "", nullptr }
     };
 
@@ -2928,7 +2925,8 @@ GameObject* ChatHandler::GetGameObjectWithGuid(uint32 lowguid, uint32 entry) con
 
     Player* pl = m_session->GetPlayer();
 
-    return pl->GetMap()->GetGameObject(ObjectGuid(HIGHGUID_GAMEOBJECT, entry, lowguid));
+    GameObjectInfo const* goInfo = ObjectMgr::GetGameObjectInfo(entry);
+    return pl->GetMap()->GetGameObject(ObjectGuid(goInfo ? goInfo->GetHighGuid() : HIGHGUID_GAMEOBJECT, entry, lowguid));
 }
 
 enum SpellLinkType
@@ -3062,7 +3060,10 @@ ObjectGuid ChatHandler::ExtractGuidFromLink(char** text)
                 return ObjectGuid();
 
             if (GameObjectData const* data = sObjectMgr.GetGOData(lowguid))
-                return ObjectGuid(HIGHGUID_GAMEOBJECT, data->id, lowguid);
+            {
+                GameObjectInfo const* goInfo = ObjectMgr::GetGameObjectInfo(data->id);
+                return ObjectGuid(goInfo ? goInfo->GetHighGuid() : HIGHGUID_GAMEOBJECT, data->id, lowguid);
+            }
             return ObjectGuid();
         }
     }
@@ -3704,10 +3705,11 @@ void ChatHandler::BuildChatPacket(WorldPacket& data, ChatMsg msgtype, char const
             data << uint32(strlen(senderName) + 1);
             data << senderName;
             data << ObjectGuid(targetGuid);                         // Unit Target
-            if (targetGuid && !targetGuid.IsPlayer() && !targetGuid.IsPet() && (msgtype != CHAT_MSG_WHISPER_FOREIGN))
+            if (targetGuid && !targetGuid.IsPlayer() && (msgtype != CHAT_MSG_WHISPER_FOREIGN))
             {
-                data << uint32(strlen(targetName) + 1);             // target name length
-                data << targetName;                                 // target name
+                char const* name = (targetGuid.IsPet() || !targetName) ? "" : targetName; // empty for a pet
+                data << uint32(strlen(name) + 1);                   // target name length
+                data << name;                                       // target name
             }
             MANGOS_ASSERT(message);
             data << uint32(strlen(message) + 1);
@@ -3717,13 +3719,7 @@ void ChatHandler::BuildChatPacket(WorldPacket& data, ChatMsg msgtype, char const
         case CHAT_MSG_BG_SYSTEM_NEUTRAL:
         case CHAT_MSG_BG_SYSTEM_ALLIANCE:
         case CHAT_MSG_BG_SYSTEM_HORDE:
-            data << ObjectGuid(targetGuid);                         // Unit Target
-            if (targetGuid && !targetGuid.IsPlayer())
-            {
-                MANGOS_ASSERT(targetName);
-                data << uint32(strlen(targetName) + 1);             // target name length
-                data << targetName;                                 // target name
-            }
+            data << ObjectGuid(targetGuid);                         // Unit Target, never followed by its name
             MANGOS_ASSERT(message);
             data << uint32(strlen(message) + 1);
             data << message;

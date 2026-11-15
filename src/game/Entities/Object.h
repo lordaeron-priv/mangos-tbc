@@ -24,6 +24,7 @@
 #include "Util/ByteBuffer.h"
 #include "Entities/UpdateFields.h"
 #include "Entities/UpdateData.h"
+#include "Entities/UpdateMask.h"
 #include "Entities/ObjectGuid.h"
 #include "Entities/EntitiesMgr.h"
 #include "Globals/SharedDefines.h"
@@ -385,16 +386,30 @@ class Object
         // must be overwrite in appropriate subclasses (WorldObject, Item currently), or will crash
         virtual void AddToClientUpdateList();
         virtual void RemoveFromClientUpdateList();
-        virtual void UpdateVisibility(UpdateDataMapType& update_players) = 0;
-        virtual void BuildUpdateData(UpdateDataMapType& update_players) = 0;
+        // decides which clients start or stop seeing the object (Player::ScheduleCreate, Player::ScheduleOutOfRange)
+        virtual void UpdateVisibility() = 0;
+        // writes the changed values into the update packet of each client that has the object, then clears the field marks
+        virtual void BuildUpdateData() = 0;
         void MarkForClientUpdate();
-        void SendForcedObjectUpdate();
 
-        void BuildValuesUpdateBlockForPlayer(UpdateData& data, Player* target) const;
+        // Values block of this object for each of its clients: the changed fields are listed once, at the first client,
+        // then each client gets those its update field flags let it see, with the values computed for it
+        class ChangedValuesWriter
+        {
+            public:
+                explicit ChangedValuesWriter(Object const& object) : m_object(object), m_fieldsListed(false) {}
+                void WriteFor(Player* client);              // into the client's update packet
+
+            private:
+                Object const& m_object;
+                bool m_fieldsListed;
+                std::vector<uint16> m_changedFields;
+                UpdateMask m_visibleFields;
+        };
+
         void BuildValuesUpdateBlockForPlayerWithFlags(UpdateData& data, Player* target, UpdateFieldFlags flags) const;
         void BuildValuesUpdateBlockForPlayer(UpdateData& data, UpdateMask& updateMask, Player* target) const;
         void BuildForcedValuesUpdateBlockForPlayer(UpdateData& data, Player* target) const;
-        void BuildOutOfRangeUpdateBlock(UpdateData& data) const;
 
         virtual void DestroyForPlayer(Player* target) const;
 
@@ -603,9 +618,6 @@ class Object
 
         MaNGOS::unique_weak_ptr<Object> GetWeakPtr() const { return m_scriptRef; }
 
-        static void BuildOutOfRangeDataForPlayer(Player* pl, UpdateDataMapType& update_players, ObjectGuid oorObject);
-        void BuildCreateDataForPlayer(Player* player, UpdateDataMapType& update_players, bool auras = true) const;
-
     protected:
         Object();
 
@@ -613,12 +625,10 @@ class Object
         void _Create(uint32 dbGuid, uint32 guidlow, uint32 entry, HighGuid guidhigh);
 
         uint16 GetUpdateFieldFlagsForTarget(Player const* target, uint16 const*& flags) const;
-        void _SetUpdateBits(UpdateMask& updateMask, Player* target) const;
         void _SetCreateBits(UpdateMask& updateMask, Player* target) const;
 
-        void BuildMovementUpdate(ByteBuffer* data, uint8 updateFlags) const;
+        void BuildMovementUpdate(ByteBuffer* data, uint8 updateFlags, Player const* target) const;
         void BuildValuesUpdate(uint8 updatetype, ByteBuffer* data, UpdateMask* updateMask, Player* target) const;
-        void BuildUpdateDataForPlayer(Player* pl, UpdateDataMapType& update_players) const;
 
         uint16 m_objectType;
 
@@ -727,13 +737,19 @@ enum MovementFlags
     MOVEFLAG_LEVITATING         = 0x00000400,
     MOVEFLAG_ROOT               = 0x00000800,
     MOVEFLAG_FALLING            = 0x00001000,
-    MOVEFLAG_JUMPING            = 0x00002000,   // XXX CHECK THIS!
-    MOVEFLAG_FALLINGFAR         = 0x00004000,
+    MOVEFLAG_FALLINGFAR         = 0x00002000,
+    MOVEFLAG_PENDINGSTOP        = 0x00004000,
+    MOVEFLAG_PENDINGSTRAFESTOP  = 0x00008000,
+    MOVEFLAG_PENDINGFORWARD     = 0x00010000,
+    MOVEFLAG_PENDINGBACKWARD    = 0x00020000,
+    MOVEFLAG_PENDINGSTRAFELEFT  = 0x00040000,
+    MOVEFLAG_PENDINGSTRAFERIGHT = 0x00080000,
+    MOVEFLAG_PENDINGROOT        = 0x00100000,
     MOVEFLAG_SWIMMING           = 0x00200000,               // appears with fly flag also
     MOVEFLAG_ASCENDING          = 0x00400000,               // swim up also
-    MOVEFLAG_CAN_FLY            = 0x00800000,
-    MOVEFLAG_FLYING             = 0x01000000,
-    MOVEFLAG_FLYING2            = 0x02000000,               // Actual flying mode
+    MOVEFLAG_DESCENDING         = 0x00800000,               // swim down also
+    MOVEFLAG_CAN_FLY            = 0x01000000,
+    MOVEFLAG_FLYING             = 0x02000000,               // Actual flying mode
     MOVEFLAG_SPLINE_ELEVATION   = 0x04000000,               // used for flight paths
     MOVEFLAG_SPLINE_ENABLED     = 0x08000000,               // used for flight paths
     MOVEFLAG_WATERWALKING       = 0x10000000,               // prevent unit from falling through water
@@ -743,7 +759,7 @@ enum MovementFlags
     // Can not be present with MOVEFLAG_ROOT (otherwise client freeze)
     MOVEFLAG_MASK_MOVING        =
         MOVEFLAG_FORWARD | MOVEFLAG_BACKWARD | MOVEFLAG_STRAFE_LEFT | MOVEFLAG_STRAFE_RIGHT |
-        MOVEFLAG_PITCH_UP | MOVEFLAG_PITCH_DOWN | MOVEFLAG_JUMPING | MOVEFLAG_FALLINGFAR |
+        MOVEFLAG_PITCH_UP | MOVEFLAG_PITCH_DOWN | MOVEFLAG_FALLINGFAR |
         MOVEFLAG_SPLINE_ELEVATION,
     MOVEFLAG_MASK_MOVING_OR_TURN = MOVEFLAG_MASK_MOVING | MOVEFLAG_TURN_LEFT | MOVEFLAG_TURN_RIGHT,
     MOVEFLAG_MASK_MOVING_FORWARD = MOVEFLAG_FORWARD | MOVEFLAG_STRAFE_LEFT | MOVEFLAG_STRAFE_RIGHT | MOVEFLAG_FALLING,
@@ -754,14 +770,14 @@ enum MovementFlags
 MovementFlags const movementFlagsMask = MovementFlags(
         MOVEFLAG_FORWARD | MOVEFLAG_BACKWARD  | MOVEFLAG_STRAFE_LEFT | MOVEFLAG_STRAFE_RIGHT |
         MOVEFLAG_PITCH_UP | MOVEFLAG_PITCH_DOWN | MOVEFLAG_FALLING |
-        MOVEFLAG_FALLINGFAR | MOVEFLAG_ASCENDING | MOVEFLAG_FLYING |
+        MOVEFLAG_FALLINGFAR | MOVEFLAG_ASCENDING | MOVEFLAG_DESCENDING | MOVEFLAG_FLYING |
         MOVEFLAG_SPLINE_ELEVATION
                                         );
 
 MovementFlags const movementFlagsIgnoreFlyingMask = MovementFlags(
     MOVEFLAG_FORWARD | MOVEFLAG_BACKWARD | MOVEFLAG_STRAFE_LEFT | MOVEFLAG_STRAFE_RIGHT |
     MOVEFLAG_PITCH_UP | MOVEFLAG_PITCH_DOWN | MOVEFLAG_FALLING |
-    MOVEFLAG_FALLINGFAR | MOVEFLAG_ASCENDING |
+    MOVEFLAG_FALLINGFAR | MOVEFLAG_ASCENDING | MOVEFLAG_DESCENDING |
     MOVEFLAG_SPLINE_ELEVATION
 );
 
@@ -1104,9 +1120,13 @@ class WorldObject : public Object
 
         void AddToClientUpdateList() override;
         void RemoveFromClientUpdateList() override;
-        void BuildUpdateData(UpdateDataMapType&) override;
-        void UpdateVisibility(UpdateDataMapType& update_players) override;
-        
+        void BuildUpdateData() override;
+        void UpdateVisibility() override;
+        // sends the changed values now instead of at the next client update tick
+        void SendForcedObjectUpdate();
+        // number of transports carrying the object, 0 if none
+        uint32 GetCarrierDepth() const;
+
         static Creature* SummonCreature(TempSpawnSettings settings, Map* map);
         Creature* SummonCreature(uint32 id, float x, float y, float z, float ang, TempSpawnType spwtype, uint32 despwtime, bool asActiveObject = false, bool setRun = false, uint32 pathId = 0, uint32 faction = 0, uint32 modelId = 0, bool spawnCounting = false, bool forcedOnTop = false);
 
@@ -1139,7 +1159,7 @@ class WorldObject : public Object
         void RemoveSpellCooldown(uint32 spellId, bool updateClient = true);
         virtual void RemoveSpellCategoryCooldown(uint32 category, bool updateClient = true);
         virtual void RemoveAllCooldowns(bool /*sendOnly*/ = false) { m_GCDCatMap.clear(); m_cooldownMap.clear(); m_lockoutMap.clear(); }
-        bool IsSpellReady(SpellEntry const& spellEntry, ItemPrototype const* itemProto = nullptr) const;
+        bool IsSpellReady(SpellEntry const& spellEntry, ItemPrototype const* itemProto = nullptr, bool itemCategoryOnly = false) const;
         bool IsSpellReady(uint32 spellId, ItemPrototype const* itemProto = nullptr) const;
         bool IsSpellOnPermanentCooldown(SpellEntry const& spellEntry) const;
         bool HasGCDOrCooldownWithinMargin(SpellEntry const& spellEntry, ItemPrototype const* itemProto = nullptr);
@@ -1190,6 +1210,8 @@ class WorldObject : public Object
         GuidSet& GetClientGuidsIAmAt() { return m_clientGUIDsIAmAt; }
 
         void DestroyOnClientsIAmAt();
+        // the object leaves the view of all its clients: out of range in their next update packet
+        void ScheduleOutOfRangeOnClientsIAmAt();
 
         // Event handler
         EventProcessor m_events;

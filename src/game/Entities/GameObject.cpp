@@ -199,7 +199,10 @@ bool GameObject::Create(uint32 dbGuid, uint32 guidlow, uint32 name_id, Map* map,
         return false;
     }
 
-    Object::_Create(dbGuid, guidlow, goinfo->id, HIGHGUID_GAMEOBJECT);
+    if (!guidlow)                                           // no free map guid counter, already logged
+        return false;
+
+    Object::_Create(dbGuid, guidlow, goinfo->id, goinfo->GetHighGuid());
 
     m_goInfo = goinfo;
 
@@ -734,15 +737,7 @@ void GameObject::Update(const uint32 diff)
             if (IsInWorld())
             {
                 if (!IsUsingNewSpawningSystem()) // schedule out of range
-                {
-                    auto& clientGuids = GetClientGuidsIAmAt();
-                    for (auto& clientGuid : clientGuids)
-                        if (Player* client = GetMap()->GetPlayer(clientGuid))
-                            client->RemoveAtClient(this, true);
-                    GetMap()->AddUpdateRemoveObject(GetClientGuidsIAmAt(), GetObjectGuid());
-                    clientGuids.clear();
-                    GetClientGuidsIAmAt().clear();
-                }
+                    ScheduleOutOfRangeOnClientsIAmAt();
             }
 
             m_forcedDespawn = false;
@@ -941,7 +936,7 @@ bool GameObject::LoadFromDB(uint32 dbGuid, Map* map, uint32 newGuid, uint32 forc
     }
 
     if (dynguid || newGuid == 0)
-        newGuid = map->GenerateLocalLowGuid(HIGHGUID_GAMEOBJECT);
+        newGuid = map->GenerateLocalLowGuid(HIGHGUID_GAMEOBJECT, entry);
 
     if (!Create(dbGuid, newGuid, entry, map, x, y, z, ang, rotation0, rotation1, rotation2, rotation3, animprogress, GO_STATE_READY))
         return false;
@@ -1020,7 +1015,10 @@ void GameObject::SetOwnerGuid(ObjectGuid guid)
 
 Unit* GameObject::GetOwner() const
 {
-    return ObjectAccessor::GetUnit(*this, GetOwnerGuid());
+    if (!IsInWorld())
+        return nullptr;
+
+    return GetMap()->GetUnit(GetOwnerGuid());
 }
 
 WorldObject* GameObject::GetSpawner() const
@@ -1265,7 +1263,7 @@ GameObject* GameObject::SummonLinkedTrapIfAny() const
         return nullptr;
 
     GameObject* linkedGO = new GameObject;
-    uint32 lowGuid = GetMap()->GenerateLocalLowGuid(HIGHGUID_GAMEOBJECT);
+    uint32 lowGuid = GetMap()->GenerateLocalLowGuid(HIGHGUID_GAMEOBJECT, linkedEntry);
     if (!linkedGO->Create(lowGuid, lowGuid, linkedEntry, GetMap(),
                           GetPositionX(), GetPositionY(), GetPositionZ(), GetOrientation(), 0.0f, 0.0f, 0.0f, 0.0f, GO_ANIMPROGRESS_DEFAULT, GO_STATE_READY))
     {
@@ -1417,14 +1415,6 @@ bool GameObject::CanUseNow(Player const* player) const
 {
     switch (GetGoType())
     {
-        case GAMEOBJECT_TYPE_CHAIR:
-        {
-            float x, y;
-            std::tie(x, y) = GetClosestChairSlotPosition(player);
-            if (player->GetDistance(x, y, GetPositionZ(), DIST_CALC_NONE, GetTransport()) > 3.f * 3.f)
-                return false;
-            break;
-        }
         case GAMEOBJECT_TYPE_SUMMONING_RITUAL:
         {
             SpellEntry const* spellInfo = sSpellTemplate.LookupEntry<SpellEntry>(m_goInfo->summoningRitual.spellId);
@@ -1607,8 +1597,14 @@ void GameObject::Use(Unit* user, SpellEntry const* spellInfo)
                 caster = nullptr;
 
             if (goInfo->trap.spellId)
-                if (CastSpell(caster, user, goInfo->trap.spellId, TRIGGERED_OLD_TRIGGERED, nullptr, nullptr, GetObjectGuid()) != SPELL_CAST_OK)
+            {
+                SpellEntry const* spellInfo = sSpellTemplate.LookupEntry<SpellEntry>(goInfo->trap.spellId);
+                if (spellInfo->SpellFamilyName == SPELLFAMILY_HUNTER) // hunter traps confirmed
+                    caster = nullptr;
+
+                if (CastSpell(caster, user, spellInfo, TRIGGERED_OLD_TRIGGERED, nullptr, nullptr, GetObjectGuid()) != SPELL_CAST_OK)
                     return;
+            }
             // use template cooldown if provided
             m_cooldownTime = time(nullptr) + (goInfo->trap.cooldown ? goInfo->trap.cooldown : uint32(4));
 
@@ -2674,7 +2670,7 @@ std::pair<float, float> GameObject::GetClosestChairSlotPosition(Unit const* user
     // check if the db is sane
     if (GetGOInfo()->chair.slots > 0)
     {
-        float lowestDist = DEFAULT_VISIBILITY_DISTANCE;
+        float lowestDist = std::numeric_limits<float>::max();
 
         float x_lowest = GetPositionX();
         float y_lowest = GetPositionY();

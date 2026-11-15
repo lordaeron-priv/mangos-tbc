@@ -40,10 +40,6 @@
 #include "AI/ScriptDevAI/ScriptDevAIMgr.h"
 #include "Anticheat/Anticheat.hpp"
 
-#ifdef BUILD_DEPRECATED_PLAYERBOT
-#include "PlayerBot/Base/PlayerbotMgr.h"
-#endif
-
 #ifdef ENABLE_PLAYERBOTS
 #include "playerbot/playerbot.h"
 #include "playerbot/PlayerbotAIConfig.h"
@@ -214,22 +210,22 @@ bool LoginQueryHolder::Initialize()
     return res;
 }
 
-// don't call WorldSession directly
-// it may get deleted before the query callbacks get executed
-// instead pass an account id to this handler
+// Don't call WorldSession directly, because it may get deleted before the query
+// callbacks get executed. Instead, pass an account id to these handlers.
+
+void HandleCharEnumCallback(std::unique_ptr<QueryResult> result, uint32 account)
+{
+    WorldSession* session = sWorld.FindSession(account);
+    if (!session)
+    {
+        return;
+    }
+    session->HandleCharEnum(std::move(result));
+}
+
 class CharacterHandler
 {
     public:
-        void HandleCharEnumCallback(QueryResult* result, uint32 account)
-        {
-            WorldSession* session = sWorld.FindSession(account);
-            if (!session)
-            {
-                delete result;
-                return;
-            }
-            session->HandleCharEnum(result);
-        }
 
         void HandlePlayerLoginCallback(QueryResult* /*dummy*/, SqlQueryHolder* holder)
         {
@@ -258,37 +254,9 @@ class CharacterHandler
                 session->HandlePlayerLogin((LoginQueryHolder*)holder);
 #endif
         }
-
-#ifdef BUILD_DEPRECATED_PLAYERBOT
-        // This callback is different from the normal HandlePlayerLoginCallback in that it
-        // sets up the bot's world session and also stores the pointer to the bot player in the master's
-        // world session m_playerBots map
-        void HandlePlayerBotLoginCallback(QueryResult* /*dummy*/, SqlQueryHolder* holder)
-        {
-            if (!holder)
-                return;
-
-            LoginQueryHolder* lqh = (LoginQueryHolder*) holder;
-
-            WorldSession* masterSession = sWorld.FindSession(lqh->GetAccountId());
-
-            if (! masterSession || sObjectMgr.GetPlayer(lqh->GetGuid()))
-            {
-                delete holder;
-                return;
-            }
-
-            // The bot's WorldSession is owned by the bot's Player object
-            // The bot's WorldSession is deleted by PlayerbotMgr::LogoutPlayerBot
-            WorldSession* botSession = new WorldSession(lqh->GetAccountId(), nullptr, SEC_PLAYER, masterSession->GetExpansion(), 0, DEFAULT_LOCALE, masterSession->GetAccountName(), 0, masterSession->GetRecruitingFriendId(), false);
-            botSession->SetNoAnticheat();
-            botSession->HandlePlayerLogin(lqh); // will delete lqh
-            masterSession->GetPlayer()->GetPlayerbotMgr()->OnBotLogin(botSession->GetPlayer());
-        }
-#endif
 } chrHandler;
 
-void WorldSession::HandleCharEnum(QueryResult* result)
+void WorldSession::HandleCharEnum(std::unique_ptr<QueryResult> queryResult)
 {
     WorldPacket data(SMSG_CHAR_ENUM, 100);                  // we guess size
 
@@ -296,18 +264,23 @@ void WorldSession::HandleCharEnum(QueryResult* result)
 
     data << num;
 
-    if (result)
+    if (queryResult)
     {
         do
         {
-            uint32 guidlow = (*result)[0].GetUInt32();
+            // the client rejects the whole list beyond 10 characters
+            if (num == 10)
+            {
+                sLog.outError("Account %u has more than 10 characters, only the first 10 are listed.", GetAccountId());
+                break;
+            }
+
+            uint32 guidlow = (*queryResult)[0].GetUInt32();
             DETAIL_LOG("Build enum data for char guid %u from account %u.", guidlow, GetAccountId());
-            if (Player::BuildEnumData(result, data))
+            if (Player::BuildEnumData(queryResult.get(), data))
                 ++num;
         }
-        while (result->NextRow());
-
-        delete result;
+        while (queryResult->NextRow());
     }
 
     data.put<uint8>(0, num);
@@ -318,7 +291,8 @@ void WorldSession::HandleCharEnum(QueryResult* result)
 void WorldSession::HandleCharEnumOpcode(WorldPacket& /*recv_data*/)
 {
     /// get all the data necessary for loading all characters (along with their pets) on the account
-    CharacterDatabase.AsyncPQuery(&chrHandler, &CharacterHandler::HandleCharEnumCallback, GetAccountId(),
+    auto queryCallback = std::bind(HandleCharEnumCallback, std::placeholders::_1, GetAccountId());
+    CharacterDatabase.AsyncPQuery(std::move(queryCallback),
                                   !sWorld.getConfig(CONFIG_BOOL_DECLINED_NAMES_USED) ?
                                   //   ------- Query Without Declined Names --------
                                   //           0               1                2                3                 4                  5                       6                        7
@@ -705,29 +679,6 @@ void WorldSession::HandlePlayerLoginOpcode(WorldPacket& recv_data)
     CharacterDatabase.DelayQueryHolder(&chrHandler, &CharacterHandler::HandlePlayerLoginCallback, holder);
 }
 
-#ifdef BUILD_DEPRECATED_PLAYERBOT
-// Can't easily reuse HandlePlayerLoginOpcode for logging in bots because it assumes
-// a WorldSession exists for the bot. The WorldSession for a bot is created after the character is loaded.
-void PlayerbotMgr::LoginPlayerBot(ObjectGuid playerGuid)
-{
-    // has bot already been added?
-    if (sObjectMgr.GetPlayer(playerGuid))
-        return;
-
-    uint32 accountId = sObjectMgr.GetPlayerAccountIdByGUID(playerGuid);
-    if (accountId == 0)
-        return;
-
-    LoginQueryHolder* holder = new LoginQueryHolder(accountId, playerGuid);
-    if (!holder->Initialize())
-    {
-        delete holder;                                      // delete all unprocessed queries
-        return;
-    }
-    CharacterDatabase.DelayQueryHolder(&chrHandler, &CharacterHandler::HandlePlayerBotLoginCallback, holder);
-}
-#endif
-
 void WorldSession::HandlePlayerLogin(LoginQueryHolder* holder)
 {
     ObjectGuid playerGuid = holder->GetGuid();
@@ -1012,12 +963,7 @@ void WorldSession::HandlePlayerReconnect()
     m_playerLoading = true;
 
     // reset all visible objects to be able to resend them
-    for (auto guid : _player->m_clientGUIDs)
-    {
-        if (WorldObject* object = _player->GetMap()->GetWorldObject(guid))
-            object->RemoveClientIAmAt(_player);
-    }
-    _player->m_clientGUIDs.clear();
+    _player->ForgetClientObjects();
 
     m_initialZoneUpdated = false;
 

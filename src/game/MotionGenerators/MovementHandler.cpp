@@ -162,6 +162,17 @@ void WorldSession::HandleMoveWorldportAckOpcode()
         if (GenericTransport* transport = map->GetTransport(GetPlayer()->m_teleportTransport))
             if (transport->GetMapId() == loc.mapid)
                 found = true;
+
+        // a player joining a transport on another map was sent where the transport stood when the teleport began: if it has
+        // left the map during the loading, the player goes back to the previous place. A passenger crossing with its transport
+        // keeps it, and the transport reaches the map through the map messages before the end of the arrival
+        if (!found && !GetPlayer()->GetTransport() && old_loc.mapid != loc.mapid)
+        {
+            GetPlayer()->m_teleportTransport = ObjectGuid();
+            GetPlayer()->m_movementInfo.ClearTransportData();
+            returnHomeFunc();
+            return;
+        }
     }
     else
         GetPlayer()->Relocate(loc.coord_x, loc.coord_y, loc.coord_z, loc.orientation);
@@ -295,14 +306,12 @@ void WorldSession::HandleMoveTeleportAckOpcode(WorldPacket& recv_data)
 
     plMover->SetSemaphoreTeleportNear(false);
 
-    uint32 old_zone = plMover->GetZoneId();
+    // the position is the destination since the order, the zone still the one before the teleport
+    uint32 old_zone = plMover->GetCachedZoneId();
 
     WorldLocation const& dest = plMover->GetTeleportDest();
 
 #ifdef ENABLE_PLAYERBOTS
-    // send MSG_MOVE_TELEPORT to observers around old position
-    SendTeleportToObservers(dest.coord_x, dest.coord_y, dest.coord_z, dest.orientation);
-
     // interrupt moving for bot if any
     if (plMover->GetPlayerbotAI() && !plMover->GetMotionMaster()->empty())
     {
@@ -390,10 +399,12 @@ void WorldSession::HandleMovementOpcodes(WorldPacket& recv_data)
     if (!ProcessMovementInfo(movementInfo, mover, plMover, recv_data))
         return;
 
-    // CMSG opcode has no handler in client, should not be sent to others.
-    // It is sent by client when you jump and hit something on the way up,
+    // These CMSG opcodes have no handler in client, should not be sent to others.
+    // CMSG_MOVE_FALL_RESET is sent by client when you jump and hit something on the way up,
     // thus stopping upward movement and causing you to descend sooner.
-    if (opcode == CMSG_MOVE_FALL_RESET)
+    // CMSG_MOVE_CHNG_TRANSPORT is sent by client when it boards or leaves a transport.
+    // CMSG_MOVE_SET_FLY is sent by client when it starts or stops flying.
+    if (opcode == CMSG_MOVE_FALL_RESET || opcode == CMSG_MOVE_CHNG_TRANSPORT || opcode == CMSG_MOVE_SET_FLY)
         return;
 
     WorldPacket data(opcode, recv_data.size());
@@ -582,14 +593,16 @@ void WorldSession::SendKnockBack(Unit* who, float angle, float horizontalSpeed, 
     float vsin = sin(angle);
     float vcos = cos(angle);
 
+    uint32 const counter = GetOrderCounter();
     WorldPacket data(SMSG_MOVE_KNOCK_BACK, 9 + 4 + 4 + 4 + 4 + 4);
     data << who->GetPackGUID();
-    data << GetOrderCounter();
+    data << counter;
     data << float(vcos);                                // x direction
     data << float(vsin);                                // y direction
     data << float(horizontalSpeed);                     // Horizontal speed
     data << float(-verticalSpeed);                      // Z Movement speed (vertical)
     SendPacket(data);
+    m_anticheat->OrderSent(data.GetOpcode(), counter);
     IncrementOrderCounter();
 
     m_anticheat->KnockBack(horizontalSpeed, -verticalSpeed, vcos, vsin);
@@ -715,8 +728,7 @@ bool WorldSession::VerifyMovementInfo(MovementInfo const& movementInfo, Unit* mo
     if (movementInfo.HasMovementFlag(MOVEFLAG_ONTRANSPORT))
     {
         // transports size limited
-        // (also received at zeppelin/lift leave by some reason with t_* as absolute in continent coordinates, can be safely skipped)
-        if (movementInfo.GetTransportPos().x > 50 || movementInfo.GetTransportPos().y > 50 || movementInfo.GetTransportPos().z > 100)
+        if (std::fabs(movementInfo.GetTransportPos().x) > 100.0f || std::fabs(movementInfo.GetTransportPos().y) > 100.0f || std::fabs(movementInfo.GetTransportPos().z) > 100.0f)
             return false;
 
         if (!MaNGOS::IsValidMapCoord(movementInfo.GetPos().x + movementInfo.GetTransportPos().x, movementInfo.GetPos().y + movementInfo.GetTransportPos().y,
@@ -818,6 +830,13 @@ bool WorldSession::ProcessMovementInfo(MovementInfo& movementInfo, Unit* mover, 
     if (plMover && plMover->IsBeingTeleported())
         return false;
 
+    // leaving a transport sends the transport flag with an empty transport guid and the world position as offsets
+    if (movementInfo.HasMovementFlag(MOVEFLAG_ONTRANSPORT) && movementInfo.GetTransportGuid().IsEmpty())
+    {
+        movementInfo.RemoveMovementFlag(MOVEFLAG_ONTRANSPORT);
+        movementInfo.ClearTransportData();
+    }
+
     if (!VerifyMovementInfo(movementInfo, mover, recv_data.GetOpcode() == CMSG_FORCE_MOVE_UNROOT_ACK))
         return false;
 
@@ -839,7 +858,9 @@ bool WorldSession::ProcessMovementInfo(MovementInfo& movementInfo, Unit* mover, 
     }
 
     /* process position-change */
-    HandleMoverRelocation(movementInfo);
+    // a player teleported near is at the destination since the order: a move the client sent before applying it is stale
+    if (!plMover || !plMover->IsBeingTeleportedNear())
+        HandleMoverRelocation(movementInfo);
 
     // just landed from a knockback? update status
     if (plMover && plMover->IsLaunched() && (recv_data.GetOpcode() == MSG_MOVE_FALL_LAND || recv_data.GetOpcode() == MSG_MOVE_START_SWIM))
@@ -898,6 +919,7 @@ void WorldSession::ComputeNewClockDelta()
         latencyAccumulator(pair.second);
 
     uint32 latencyMedian = static_cast<uint32>(std::round(median(latencyAccumulator)));
+    m_timeSyncRoundTrip = latencyMedian;
     uint32 latencyStandardDeviation = static_cast<uint32>(std::round(sqrt(variance(latencyAccumulator))));
 
     accumulator_set<int64, features<tag::mean> > clockDeltasAfterFiltering;

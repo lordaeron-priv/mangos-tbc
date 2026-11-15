@@ -385,11 +385,7 @@ void WorldSession::HandleCastSpellOpcode(WorldPacket& recvPacket)
     // client provided targets
     SpellCastTargets targets;
 
-#ifdef BUILD_DEPRECATED_PLAYERBOT
-    recvPacket >> targets.ReadForCaster(mover);
-#else
     recvPacket >> targets.ReadForCaster(_player);
-#endif
 
     // auto-selection buff level base at target level (in spellInfo)
     if (Unit* target = targets.getUnitTarget())
@@ -559,6 +555,19 @@ void WorldSession::HandlePetCancelAuraOpcode(WorldPacket& recvPacket)
         pet->SendPetActionFeedback(FEEDBACK_PET_DEAD);
         return;
     }
+
+    if (spellInfo->HasAttribute(SPELL_ATTR_NO_AURA_CANCEL))
+        return;
+
+    if (spellInfo->HasAttribute(SPELL_ATTR_EX_NO_AURA_ICON) && !IsSpellHaveAura(spellInfo, SPELL_AURA_TRACK_RESOURCES))
+        return;
+
+    if (IsPassiveSpell(spellInfo))
+        return;
+
+    SpellAuraHolder* holder = pet->GetSpellAuraHolder(spellId);
+    if (!holder || !holder->IsPositive())
+        return;
 
     pet->RemoveAurasDueToSpell(spellId);
 }

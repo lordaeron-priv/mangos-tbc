@@ -38,6 +38,7 @@
 #include "Globals/GraveyardManager.h"
 #include "Maps/SpawnManager.h"
 #include "Maps/MapDataContainer.h"
+#include "Maps/MapGuidAllocator.h"
 #include "Util/UniqueTrackablePtr.h"
 #include "World/WorldStateVariableManager.h"
 
@@ -201,6 +202,7 @@ class Map : public GridRefManager<NGridType>
         bool GetUnloadLock(const GridPair& p) const { return getNGrid(p.x_coord, p.y_coord)->getUnloadLock(); }
         void SetUnloadLock(const GridPair& p, bool on) { getNGrid(p.x_coord, p.y_coord)->setUnloadExplicitLock(on); }
         void ForceLoadGrid(float x, float y);
+        void LoadGrid(float x, float y);
         bool UnloadGrid(const uint32& x, const uint32& y, bool pForce);
         virtual void UnloadAll(bool pForce);
 
@@ -258,8 +260,6 @@ class Map : public GridRefManager<NGridType>
         void AddObjectToRemoveList(WorldObject* obj);
         void RemoveObjectFromRemoveList(WorldObject* obj);
         bool IsInRemoveList(WorldObject* obj) const;
-
-        void UpdateObjectVisibility(WorldObject* obj, Cell cell, const CellPair& cellpair);
 
         void resetMarkedCells() { marked_cells.reset(); }
         bool isCellMarked(uint32 pCellId) const { return marked_cells.test(pCellId); }
@@ -341,17 +341,12 @@ class Map : public GridRefManager<NGridType>
         // schedule for update object visibility change
         void AddUpdateMovementObject(Object* obj) { m_objectsToClientMovementUpdate.insert(obj); }
         void RemoveUpdateMovementObject(Object* obj) { m_objectsToClientMovementUpdate.erase(obj); }
-        // schedule update object destruction of object
-        void AddUpdateRemoveObject(GuidSet& visible, ObjectGuid guid);
-        void AddUpdateRemoveObject(GuidSet&& visible, ObjectGuid guid);
-
-        void AddCreateAtClientObject(Player* player, Object* obj);
-        void AddCreateAtClientObjects(PlayerSet const& players, Object* obj);
 
         void AddCameraToWorld(WorldObject* obj);
 
-        // DynObjects currently
-        uint32 GenerateLocalLowGuid(HighGuid guidhigh);
+        // entry: the one written in the guid (the pet number for pets), not used for dynamic objects
+        // Stops the server if no counter is free for this entry after a full round (see MapGuidAllocator)
+        uint32 GenerateLocalLowGuid(HighGuid guidhigh, uint32 entry = 0);
 
         // get corresponding TerrainData object for this particular map
         const TerrainInfo* GetTerrain() const { return m_TerrainData; }
@@ -453,7 +448,7 @@ class Map : public GridRefManager<NGridType>
         void AddWaypointingNpc(Unit* npc);
         void RemoveWaypointingNpc(Unit* npc);
 
-        void UpdateInfinite(Player& player, UpdateData& updateData, GuidSet& clientGUIDs, WorldObjectSet& visibleNow) const;
+        void UpdateInfinite(Player& player) const;
     private:
         void LoadMapAndVMap(int gx, int gy);
 
@@ -488,13 +483,12 @@ class Map : public GridRefManager<NGridType>
         void setNGrid(NGridType* grid, uint32 x, uint32 y);
         void ScriptsProcess();
 
-        void UpdateVisibility(UpdateDataMapType& update_players);
+        void UpdateVisibility();
         void SendObjectUpdates();
         std::set<Object*> m_objectsToClientUpdate;
         std::set<std::pair<Object*, ObjectGuid>> m_objectsToClientCreateUpdate;
         std::set<Object*> m_objectsToClientMovementUpdate;
-        std::vector<std::pair<GuidSet, ObjectGuid>> m_objectsToClientRemove;
-        std::unordered_map<Object*, PlayerSet> m_visibilityAdded;
+        std::vector<std::pair<uint32, Object*>> m_visibilityCheckedObjects; // carrier depth and object, checked at this tick
 
         std::set<WorldObject*> m_largeObjects;
         std::set<WorldObject*> m_infiniteObjects;
@@ -551,11 +545,11 @@ class Map : public GridRefManager<NGridType>
         uint32 i_script_id;
 
         // Map local low guid counters
-        ObjectGuidGenerator<HIGHGUID_UNIT> m_CreatureGuids;
-        ObjectGuidGenerator<HIGHGUID_GAMEOBJECT> m_GameObjectGuids;
+        MapGuidAllocator m_CreatureGuids;
+        MapGuidAllocator m_GameObjectGuids;
         ObjectGuidGenerator<HIGHGUID_TRANSPORT> m_transportGuids;
-        ObjectGuidGenerator<HIGHGUID_DYNAMICOBJECT> m_DynObjectGuids;
-        ObjectGuidGenerator<HIGHGUID_PET> m_PetGuids;
+        MapGuidAllocator m_DynObjectGuids;
+        MapGuidAllocator m_PetGuids;
 
         // Type specific code for add/remove to/from grid
         template<class T>

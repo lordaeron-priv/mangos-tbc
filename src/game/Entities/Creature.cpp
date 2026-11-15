@@ -305,15 +305,7 @@ void Creature::RemoveCorpse(bool inPlace)
     GetMap()->CreatureRelocation(this, x, y, z, o);
 
     if (!IsUsingNewSpawningSystem()) // schedule out of range
-    {
-        auto& clientGuids = GetClientGuidsIAmAt();
-        for (auto& clientGuid : clientGuids)
-            if (Player* client = GetMap()->GetPlayer(clientGuid))
-                client->RemoveAtClient(this, true);
-        GetMap()->AddUpdateRemoveObject(GetClientGuidsIAmAt(), GetObjectGuid());
-        clientGuids.clear();
-        GetClientGuidsIAmAt().clear();
-    }
+        ScheduleOutOfRangeOnClientsIAmAt();
     else
         AddObjectToRemoveList();
 }
@@ -1680,6 +1672,9 @@ void Creature::TriggerDelayedPetSpells()
 
 bool Creature::CreateFromProto(uint32 dbGuid, uint32 guidlow, CreatureInfo const* cinfo, const CreatureData* data /*=nullptr*/, GameEventCreatureData const* eventData /*=nullptr*/)
 {
+    if (!guidlow)                                           // no free map guid counter, already logged
+        return false;
+
     m_originalEntry = cinfo->Entry;
 
     uint32 newEntry = cinfo->Entry;
@@ -1748,7 +1743,7 @@ bool Creature::LoadFromDB(uint32 dbGuid, Map* map, uint32 newGuid, uint32 forced
     }
 
     if (dynguid || newGuid == 0)
-        newGuid = map->GenerateLocalLowGuid(cinfo->GetHighGuid());
+        newGuid = map->GenerateLocalLowGuid(cinfo->GetHighGuid(), cinfo->Entry);
 
     CreatureCreatePos pos(map, data->posX, data->posY, data->posZ, data->orientation);
 
@@ -2262,7 +2257,9 @@ void Creature::CallAssistance(Unit* enemy)
 
 std::pair<bool, GuidVector> Creature::MarkCallAssistanceOnPull(Unit* enemy)
 {
-    bool stored = m_AlreadyCallAssistance;
+    if (m_AlreadyCallAssistance)
+        return {false, GuidVector()};
+
     SetNoCallAssistance(true);
 
     if (!CanCallForAssistance())
@@ -2279,7 +2276,7 @@ std::pair<bool, GuidVector> Creature::MarkCallAssistanceOnPull(Unit* enemy)
     GuidVector guids;
     for (Creature* creature : receiverList)
         guids.push_back(creature->GetObjectGuid());
-    return {stored, guids};
+    return {true, guids};
 }
 
 void Creature::CallAssistanceOnPull(Unit* enemy, GuidVector const& receiverList)
